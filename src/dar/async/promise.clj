@@ -39,50 +39,39 @@
   (then [this cb] (cb this) nil)
   (value [this] this))
 
-(defprotocol ^:private IState
-  (^:private deliver [this v])
-  (^:private add-callback [this cb])
-  (^:private clear-callbacks [this])
-  (^:private get-callbacks [this])
-  (^:private has-value? [this])
-  (^:private get-value [this]))
+(deftype ^:private State [value has-value? callbacks])
 
-(deftype ^:private State [value has-value? callbacks]
-  IState
-  (deliver [this v] (if has-value?
-                      (State. value true nil)
-                      (State. v true callbacks)))
+(defn- deliver [^State s v]
+  (if (.-has-value? s)
+    (State. (.-value s) true nil)
+    (State. v true (.-callbacks s))))
 
-  (add-callback [this cb] (if has-value?
-                            this
-                            (State. nil false (if callbacks
-                                                (conj callbacks cb)
-                                                [cb]))))
+(defn- add-callback [^State s cb]
+  (if (.-has-value? s)
+    s
+    (State. nil false (if-let [callbacks (.-callbacks s)]
+                        (conj callbacks cb)
+                        [cb]))))
 
-  (clear-callbacks [this] (State. value has-value? nil))
-
-  (get-callbacks [_] callbacks)
-
-  (has-value? [_] has-value?)
-
-  (get-value [_] value))
+(defn- clear-callbacks [^State s]
+  (State. (.-value s) (.-has-value? s) nil))
 
 (deftype Promise [state abort-cb ^AtomicBoolean aborted?]
   IPromise
-  (deliver! [this v] (let [s (swap! state deliver v)]
-                       (when-let [callbacks (get-callbacks s)]
+  (deliver! [this v] (let [^State s (swap! state deliver v)]
+                       (when-let [callbacks (.-callbacks s)]
                          (swap! state clear-callbacks)
                          (doseq [cb callbacks]
                            (cb v)))))
 
-  (delivered? [this] (has-value? @state))
+  (delivered? [this] (.-has-value? ^State @state))
 
-  (then [this cb] (let [s (swap! state add-callback cb)]
-                    (when (has-value? s)
-                      (cb (get-value s))
+  (then [this cb] (let [^State s (swap! state add-callback cb)]
+                    (when (.-has-value? s)
+                      (cb (.-value s))
                       nil)))
 
-  (value [this] (get-value @state))
+  (value [this] (.-value ^State @state))
 
   (abort! [this] (when abort-cb
                    (when (.compareAndSet aborted? false true)
