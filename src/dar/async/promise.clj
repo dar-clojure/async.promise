@@ -75,7 +75,8 @@
 
   (abort! [this] (when abort-cb
                    (when (.compareAndSet aborted? false true)
-                     (abort-cb this)))))
+                     (abort-cb this)
+                     nil))))
 
 (defn new-promise
   ([] (new-promise nil))
