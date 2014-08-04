@@ -1,6 +1,6 @@
 (ns dar.async.promise
   (:refer-clojure :exclude [deliver])
-  (:import (java.util.concurrent.atomic AtomicBoolean)))
+  (:import (java.util.concurrent.atomic AtomicReference)))
 
 (set! *warn-on-reflection* true)
 
@@ -39,50 +39,48 @@
   (then [this cb] (cb this) nil)
   (value [this] this))
 
-(deftype ^:private State [value has-value? callbacks])
+(deftype ^:private State [value has-value? callbacks aborted?])
 
-(defn- deliver [^State s v]
-  (if (.-has-value? s)
-    (State. (.-value s) true nil)
-    (State. v true (.-callbacks s))))
-
-(defn- add-callback [^State s cb]
-  (if (.-has-value? s)
-    s
-    (State. nil false (if-let [callbacks (.-callbacks s)]
-                        (conj callbacks cb)
-                        [cb]))))
-
-(defn- clear-callbacks [^State s]
-  (State. (.-value s) (.-has-value? s) nil))
-
-(deftype Promise [state abort-cb ^AtomicBoolean aborted?]
+(deftype Promise [^AtomicReference state abort-cb]
   IPromise
-  (deliver! [this v] (let [^State s (swap! state deliver v)]
-                       (when-let [callbacks (.-callbacks s)]
-                         (swap! state clear-callbacks)
-                         (doseq [cb callbacks]
-                           (cb v)))))
+  (deliver! [this v] (let [^State s (.get state)
+                           callbacks (.-callbacks s)]
+                       (when-not (.-has-value? s)
+                         (if (.compareAndSet state s (State. v true nil true))
+                           (doseq [cb callbacks]
+                             (cb v))
+                           (recur v)))))
 
-  (delivered? [this] (.-has-value? ^State @state))
+  (delivered? [this] (.-has-value? ^State (.get state)))
 
-  (then [this cb] (let [^State s (swap! state add-callback cb)]
-                    (when (.-has-value? s)
-                      (cb (.-value s))
-                      nil)))
+  (then [this cb] (let [^State s (.get state)]
+                    (if (.-has-value? s)
+                      (do
+                        (cb (.-value s))
+                        nil)
+                      (if-not (.compareAndSet state s
+                                (State. nil false
+                                  (if-let [callbacks (.-callbacks s)]
+                                    (conj callbacks cb)
+                                    [cb])
+                                  (.-aborted? s)))
+                        (recur cb)))))
 
-  (value [this] (.-value ^State @state))
+  (value [this] (.-value ^State (.get state)))
 
   (abort! [this] (when abort-cb
-                   (when (.compareAndSet aborted? false true)
-                     (abort-cb this)
-                     nil))))
+                   (let [^State s (.get state)]
+                     (when-not (.-aborted? s)
+                       (if (.compareAndSet state s
+                             (State. nil false (.-callbacks s) true))
+                         (do
+                           (abort-cb)
+                           nil)
+                         (recur)))))))
 
 (defn new-promise
   ([] (new-promise nil))
   ([abort-cb]
    (Promise.
-     (atom (State. nil false nil))
-     abort-cb
-     (if abort-cb
-       (AtomicBoolean. false)))))
+     (AtomicReference. (State. nil false nil false))
+     abort-cb)))
